@@ -577,7 +577,7 @@ st.markdown("""
 st.markdown("""
 <div style="background:linear-gradient(90deg,#1e3a5f,#2e6da4);
      padding:18px 24px;border-radius:10px;margin-bottom:20px;color:white">
-<h2 style="margin:0">💊 PHÚ MỸ LUMEN CONNECTOR <span style="font-size:13px;opacity:.7">v3.6</span></h2>
+<h2 style="margin:0">💊 PHÚ MỸ LUMEN CONNECTOR <span style="font-size:13px;opacity:.7">v3.7</span></h2>
 <p style="margin:4px 0 0 0;opacity:.85;font-size:14px">
 Module xử lý & ánh xạ danh mục thuốc trúng thầu → Xuất Mẫu 03 BHYT</p>
 </div>""", unsafe_allow_html=True)
@@ -983,57 +983,77 @@ with tab_main:
                 if 'ma_chon_override' not in st.session_state:
                     st.session_state['ma_chon_override'] = {}
 
-                # Build MA → DUONGDUNG map từ df_thuoc (dùng đường dùng, KHÔNG dùng ghi chú)
-                ma_dd_map = {}
+                # Build MA → list[(dd,ten)] từ df_thuoc — KHÔNG dedup theo MA
+                # (cùng mã có thể nhiều đường dùng — giữ hết)
+                ma_dd_list_map = {}   # MA → [(dd_raw, ten_raw), ...]
                 for _, td_r in df_thuoc.iterrows():
                     ma_v  = sc(td_r.get('MA',''))
                     dd_v  = sc(td_r.get('DUONGDUNG',''))
                     ten_v = sc(td_r.get('TEN',''))
-                    if ma_v and ma_v not in ma_dd_map:
-                        ma_dd_map[ma_v] = (dd_v, ten_v)
+                    if ma_v:
+                        ma_dd_list_map.setdefault(ma_v, [])
+                        pair = (dd_v, ten_v)
+                        if pair not in ma_dd_list_map[ma_v]:
+                            ma_dd_list_map[ma_v].append(pair)
 
                 for multi_idx, (_, mr) in enumerate(multi_rows.iterrows()):
-                    hc_key   = f"{mr['TEN_HOAT_CHAT']}||{mr['DUONG_DUNG']}"
-                    all_mas  = mr['NHIEU_MA'].split(' | ')
+                    hc_key  = f"{mr['TEN_HOAT_CHAT']}||{mr['DUONG_DUNG']}"
+                    all_mas = mr['NHIEU_MA'].split(' | ')
+                    dd_thau = mr['DUONG_DUNG']
 
-                    # Label: [Mã] — [ĐƯỜNG DÙNG từ file Tân dược]  (KHÔNG GHI CHÚ)
-                    cur_ma   = st.session_state['ma_chon_override'].get(hc_key, mr['MA_THUOC'])
-                    cur_idx  = all_mas.index(cur_ma) if cur_ma in all_mas else 0
-
-                    # Xây label_map dùng đường dùng thực tế
-                    label_map_multi = {}
+                    # Xây danh sách (ma, dd, ten) — mỗi cặp (MA,DD) là 1 dòng riêng
+                    # Sắp xếp: exact-name match lên đầu, rồi theo dd_score
+                    hc_tight_mr = _norm_tight(mr['TEN_HOAT_CHAT'])
+                    cand_rows = []   # [(dd_score, ma, dd, ten)]
+                    seen_pairs = set()
                     for m in all_mas:
-                        dd_v, ten_v = ma_dd_map.get(m, ('', ''))
-                        label_map_multi[m] = f"[{m}] — {ten_v} — {dd_v}" if dd_v else f"[{m}]"
+                        for dd_v, ten_v in ma_dd_list_map.get(m, [('','')]):
+                            pk = (m, _norm_tight(dd_v))
+                            if pk in seen_pairs:
+                                continue
+                            seen_pairs.add(pk)
+                            score = _dd_similarity(dd_thau, dd_v)
+                            cand_rows.append((score, m, dd_v, ten_v))
+                    cand_rows.sort(key=lambda x: x[0], reverse=True)
+
+                    # Xây label list — dùng INDEX để tránh trùng khi cùng MA
+                    multi_labels = []
+                    for score, m, dd_v, ten_v in cand_rows:
+                        lbl = f"[{m}] — {ten_v} — {dd_v}" if dd_v else f"[{m}] — {ten_v}"
+                        multi_labels.append(lbl)
 
                     xc1, xc2 = st.columns([3, 5])
                     with xc1:
                         st.markdown(f"**`{mr['TEN_HOAT_CHAT']}`** | ĐD file thầu: `{mr['DUONG_DUNG']}`")
                     with xc2:
-                        chosen = st.selectbox(
-                            "Chọn mã",
-                            options=all_mas,
-                            format_func=lambda m, lm=label_map_multi: lm.get(m, m),
-                            index=cur_idx,
-                            key=f"sel_ma_{multi_idx}_{mr['TEN_HOAT_CHAT'][:15]}",
-                            label_visibility='collapsed'
-                        )
-                        if chosen != cur_ma:
-                            _df = st.session_state['df_result']
-                            mask = (
-                                (_df['TEN_HOAT_CHAT'] == mr['TEN_HOAT_CHAT']) &
-                                (_df['DUONG_DUNG'] == mr['DUONG_DUNG'])
+                        if cand_rows:
+                            chosen_i = st.selectbox(
+                                "Chọn mã",
+                                options=list(range(len(cand_rows))),
+                                format_func=lambda i, lbs=multi_labels: lbs[i],
+                                key=f"sel_ma_{multi_idx}_{mr['TEN_HOAT_CHAT'][:15]}",
+                                label_visibility='collapsed'
                             )
-                            _df.loc[mask, 'MA_THUOC'] = chosen
-                            # Cập nhật luôn tên chuẩn và đường dùng chuẩn
-                            dd_chosen, ten_chosen = ma_dd_map.get(chosen, ('', ''))
-                            if ten_chosen:
-                                _df.loc[mask, 'TEN_HOAT_CHAT_XK'] = ten_chosen
-                            if dd_chosen:
-                                _df.loc[mask, 'MA_DUONG_DUNG'] = lookup_dd(dd_chosen, dd_lk)
-                            st.session_state['df_result'] = _df
-                            st.session_state['ma_chon_override'][hc_key] = chosen
-                            st.rerun()
+                            if st.button("✅ Xác nhận mã này",
+                                         key=f"multi_ok_{multi_idx}_{mr['TEN_HOAT_CHAT'][:15]}",
+                                         use_container_width=True):
+                                _, chosen_ma, chosen_dd, chosen_ten = cand_rows[chosen_i]
+                                _df = st.session_state['df_result']
+                                mask = (
+                                    (_df['TEN_HOAT_CHAT'] == mr['TEN_HOAT_CHAT']) &
+                                    (_df['DUONG_DUNG'] == mr['DUONG_DUNG'])
+                                )
+                                _df.loc[mask, 'MA_THUOC']          = chosen_ma
+                                _df.loc[mask, 'TEN_HOAT_CHAT_XK']  = chosen_ten if chosen_ten else mr['TEN_HOAT_CHAT']
+                                _df.loc[mask, 'DUONG_DUNG']         = chosen_dd if chosen_dd else mr['DUONG_DUNG']
+                                _df.loc[mask, 'MA_DUONG_DUNG']      = lookup_dd(chosen_dd, dd_lk) if chosen_dd else ''
+                                _df.loc[mask, 'NHIEU_MA']           = ''   # xóa flag nhiều mã
+                                st.session_state['df_result'] = _df
+                                st.session_state['ma_chon_override'][hc_key] = chosen_ma
+                                st.success(f"✅ Đã gán **{chosen_ma}** — {chosen_ten} — {chosen_dd}")
+                                st.rerun()
+                        else:
+                            st.caption("❌ Không tìm thấy thông tin trong file Tân dược")
                     st.divider()
 
         # Mã .1/.2 đã được cảnh báo qua metric 🟣, không cần block riêng
@@ -1314,6 +1334,20 @@ with tab_main:
                                         dd_chuan_save = sel_dd_raw if sel_dd_raw != '-- Chọn đường dùng chuẩn --' else ''
                                         ma_save = None
                                     if dd_chuan_save:
+                                        # Cập nhật NGAY vào df_result (không chờ rerun)
+                                        _df = st.session_state['df_result']
+                                        mask_n = (_df['TEN_HOAT_CHAT']==hc_n) & (_df['DUONG_DUNG']==dd_n)
+                                        if mask_n.any():
+                                            _df.loc[mask_n, 'DUONG_DUNG']    = dd_chuan_save.strip()
+                                            _df.loc[mask_n, 'MA_DUONG_DUNG'] = lookup_dd(dd_chuan_save, dd_lk)
+                                            # Nếu chọn từ Tân dược → cập nhật luôn MA_THUOC và TEN
+                                            if nodd_ma_opts and ma_save:
+                                                _cand_save = td_cands_nodd[sel_nodd_chosen_idx]
+                                                ten_chuan_save = _cand_save[3]  # ten_td raw
+                                                _df.loc[mask_n, 'MA_THUOC']          = ma_save
+                                                _df.loc[mask_n, 'TEN_HOAT_CHAT_XK'] = ten_chuan_save
+                                            st.session_state['df_result'] = _df
+                                        # Ghi alias để lần sau tham khảo (không tự điền)
                                         new_row = pd.DataFrame([{
                                             'TEN_HOAT_CHAT': hc_n.strip(),
                                             'DD_GOC':        dd_n.strip(),
@@ -1322,6 +1356,7 @@ with tab_main:
                                         }])
                                         df_dd_alias_cur = pd.concat([df_dd_alias_cur, new_row], ignore_index=True)
                                         dd_changed = True
+                                        st.success(f"✅ Đã lưu: {hc_n} — {dd_chuan_save}")
                                     else:
                                         st.warning("Chưa chọn")
                         st.divider()
@@ -1329,15 +1364,6 @@ with tab_main:
                 if dd_changed:
                     st.session_state['df_alias_dd'] = df_dd_alias_cur
                     save_alias_dd(df_dd_alias_cur)
-                    _df = st.session_state['df_result']
-                    for _, a_row in df_dd_alias_cur.iterrows():
-                        hc_a = a_row['TEN_HOAT_CHAT']; dd_g = a_row['DD_GOC']; dd_c = a_row['DD_CHUAN']
-                        mask = (_df['TEN_HOAT_CHAT']==hc_a) & (_df['DUONG_DUNG']==dd_g)
-                        if mask.any():
-                            _df.loc[mask, 'DUONG_DUNG']    = dd_c
-                            _df.loc[mask, 'MA_DUONG_DUNG'] = lookup_dd(dd_c, dd_lk)
-                    st.session_state['df_result'] = _df
-                    st.success("✅ Đã lưu & cập nhật đường dùng. Bấm **'▶️ Chạy xử lý lại'** để tra lại MA_THUOC.")
                     st.rerun()
 
         # ── BƯỚC 8: XUẤT FILE ───────────────────────
