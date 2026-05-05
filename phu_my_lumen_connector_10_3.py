@@ -276,23 +276,47 @@ def _dd_canonical(dd: str) -> str:
 
 def _dd_similarity(dd_thau: str, dd_td: str) -> float:
     """Tính độ tương đồng đường dùng (0.0 → 1.0).
-    Ưu tiên: cùng canonical > difflib ratio > chứa từ khóa chung > 0.
+
+    Thứ tự ưu tiên:
+    1. Exact string match (sau _norm_tight) → 1.0 (tuyệt đối cao nhất)
+       VD: dd_thau='Tiêm' vs dd_td='Tiêm' → 1.0
+    2. dd_thau='tiêm' (1 từ, không phân biệt) VÀ dd_td bắt đầu bằng 'tiêm'
+       → 0.9 (bao quát — 'Tiêm truyền', 'Tiêm bắp'... đều được đề xuất)
+    3. Cùng canonical (alias group) → 0.85
+    4. difflib ratio + từ chung bonus
     """
     import difflib as _dl
+    n1 = _norm_tight(dd_thau)
+    n2 = _norm_tight(dd_td)
+
+    # Mức 1: Exact match → 1.0
+    if n1 == n2:
+        return 1.0
+
+    # Mức 2: 'tiêm' bao quát mọi dạng tiêm (1 từ, không suffix)
+    # Áp dụng khi file thầu chỉ ghi "Tiêm" — bắt cả "Tiêm truyền", "Tiêm bắp"...
+    if n1 == 'tiêm' and n2.startswith('tiêm'):
+        return 0.9
+    if n1 == 'tiem' and n2.startswith('tiem'):
+        return 0.9
+
+    # Mức 2b: 'tiêm truyền' bao quát 'truyền tĩnh mạch', 'tiêm truyền tĩnh mạch'
+    if n1 in ('tiêm truyền', 'tiem truyen') and ('truyền' in n2 or 'truyen' in n2):
+        return 0.88
+
+    # Mức 3: Cùng canonical alias group → 0.85
     c1 = _dd_canonical(dd_thau)
     c2 = _dd_canonical(dd_td)
     if c1 and c2 and c1 == c2:
-        return 1.0
-    # Fuzzy fragment: kiểm tra bảng alias builtin
-    n1, n2 = _norm(dd_thau), _norm(dd_td)
-    # difflib
-    ratio = _dl.SequenceMatcher(None, n1, n2).ratio()
-    # Tăng điểm nếu có từ khóa chung
-    words1 = set(n1.split())
-    words2 = set(n2.split())
+        return 0.85
+
+    # Mức 4: difflib + từ chung bonus
+    n1f = _norm(dd_thau); n2f = _norm(dd_td)
+    ratio = _dl.SequenceMatcher(None, n1f, n2f).ratio()
+    words1 = set(n1f.split()); words2 = set(n2f.split())
     common = words1 & words2
     if common:
-        ratio = min(1.0, ratio + 0.15 * len(common))
+        ratio = min(0.8, ratio + 0.1 * len(common))
     return ratio
 
 def build_thuoc_lookup(df_thuoc: pd.DataFrame):
@@ -577,7 +601,7 @@ st.markdown("""
 st.markdown("""
 <div style="background:linear-gradient(90deg,#1e3a5f,#2e6da4);
      padding:18px 24px;border-radius:10px;margin-bottom:20px;color:white">
-<h2 style="margin:0">💊 PHÚ MỸ LUMEN CONNECTOR <span style="font-size:13px;opacity:.7">v3.7</span></h2>
+<h2 style="margin:0">💊 PHÚ MỸ LUMEN CONNECTOR <span style="font-size:13px;opacity:.7">v3.8</span></h2>
 <p style="margin:4px 0 0 0;opacity:.85;font-size:14px">
 Module xử lý & ánh xạ danh mục thuốc trúng thầu → Xuất Mẫu 03 BHYT</p>
 </div>""", unsafe_allow_html=True)
@@ -1080,22 +1104,24 @@ with tab_main:
 
                 def _find_td_candidates(hc_m: str, dd_m: str):
                     """
-                    Tìm ứng viên từ file Tân dược — v3.6 (Exact-Only).
+                    Tìm ứng viên từ file Tân dược — v3.7 (Exact + Contains).
 
-                    Quy tắc:
-                    1. Chuẩn hóa tên file thầu bằng _norm_tight.
-                    2. So sánh với TEN trong file Tân dược (cũng _norm_tight).
-                       CHỈ chấp nhận dòng khớp 100% tên — không first-token, không fuzzy.
-                    3. Kiểm tra số thành phần (dấu +): phải bằng nhau.
-                    4. Dedup theo (MA, DD_tight) — cùng mã khác đường dùng = 2 dòng riêng.
-                    5. Sắp xếp: dd_score giảm dần (đường dùng giống nhất lên đầu).
-                    6. ⭐ khi dd_score >= 0.8.
-                    Nếu không có dòng nào exact → trả [] (user tự xử lý alias).
+                    Thứ tự ưu tiên:
+                    1. Exact name match (tight-norm) → nhóm A (ưu tiên cao nhất)
+                    2. Contains match: tên thầu (bỏ *) chứa trong tên TD, hoặc ngược lại
+                       → nhóm B (hiển thị sau nhóm A)
+                    Trong mỗi nhóm: sắp xếp theo dd_score giảm dần.
+                    Dedup theo (MA, DD_tight).
+                    ⭐ khi nhóm A VÀ dd_score >= 0.8.
                     """
                     hc_tight = _norm_tight(hc_m)
+                    # Bỏ ký tự * để so sánh contains (Acid amin* → acid amin)
+                    hc_clean = hc_tight.rstrip('*').strip()
                     n_comp   = _count_components(hc_m)
-                    results  = []
-                    seen_ma_dd = set()   # dedup (MA, DD_tight)
+
+                    exact_rows   = []   # nhóm A: tên khớp 100%
+                    contains_rows = []  # nhóm B: tên chứa keyword
+                    seen_ma_dd   = set()
 
                     for _, td_r in df_thuoc.iterrows():
                         ten_td = sc(td_r.get('TEN', ''))
@@ -1105,12 +1131,9 @@ with tab_main:
                             continue
 
                         ten_td_t = _norm_tight(ten_td)
+                        ten_td_clean = ten_td_t.rstrip('*').strip()
 
-                        # Bỏ qua nếu tên không khớp 100% (case-insensitive, tight-norm)
-                        if ten_td_t != hc_tight:
-                            continue
-
-                        # Bỏ qua nếu số thành phần khác nhau
+                        # Số thành phần phải khớp
                         if _count_components(ten_td) != n_comp:
                             continue
 
@@ -1118,14 +1141,22 @@ with tab_main:
                         pair_key = (ma_td, _norm_tight(dd_td))
                         if pair_key in seen_ma_dd:
                             continue
-                        seen_ma_dd.add(pair_key)
 
                         dd_score = _dd_similarity(dd_m, dd_td)
-                        star_eligible = dd_score >= 0.8
-                        results.append((dd_score, ma_td, dd_td, ten_td, star_eligible))
 
-                    results.sort(key=lambda x: x[0], reverse=True)
-                    return results
+                        if ten_td_t == hc_tight or ten_td_clean == hc_clean:
+                            # Nhóm A: exact match (kể cả có/không có dấu *)
+                            seen_ma_dd.add(pair_key)
+                            star_eligible = dd_score >= 0.8
+                            exact_rows.append((dd_score, ma_td, dd_td, ten_td, star_eligible))
+                        elif hc_clean and (hc_clean in ten_td_t or ten_td_clean in hc_tight):
+                            # Nhóm B: contains — 'acid amin' in 'acid amin*' hoặc ngược lại
+                            seen_ma_dd.add(pair_key)
+                            contains_rows.append((dd_score, ma_td, dd_td, ten_td, False))
+
+                    exact_rows.sort(key=lambda x: x[0], reverse=True)
+                    contains_rows.sort(key=lambda x: x[0], reverse=True)
+                    return exact_rows + contains_rows
 
                 for row_idx, (_, mrow) in enumerate(miss_rows.iterrows()):
                     hc_m   = mrow['TEN_HOAT_CHAT']
@@ -1252,6 +1283,8 @@ with tab_main:
                     # + cùng số thành phần + sắp xếp theo dd_score
                     td_cands_nodd = []   # [(dd_score, ma, dd_td, ten_td)]
                     seen_nodd_pairs = set()
+                    hc_clean_n = hc_tight.rstrip('*').strip()
+                    nodd_exact, nodd_contains = [], []
                     for _, td_r in df_thuoc.iterrows():
                         ten_td  = sc(td_r.get('TEN',''))
                         dd_td   = sc(td_r.get('DUONGDUNG',''))
@@ -1259,17 +1292,22 @@ with tab_main:
                         if not ma_td:
                             continue
                         ten_td_t = _norm_tight(ten_td)
-                        # v3.6: CHỈ exact match tên — không first-token fallback
-                        if ten_td_t != hc_tight:
-                            continue
+                        ten_td_clean = ten_td_t.rstrip('*').strip()
                         if _count_components(ten_td) != n_comp_n:
                             continue
                         pair_key_nodd = (ma_td, _norm_tight(dd_td))
                         if pair_key_nodd in seen_nodd_pairs:
                             continue
-                        seen_nodd_pairs.add(pair_key_nodd)
                         dd_score = _dd_similarity(dd_n, dd_td)
-                        td_cands_nodd.append((dd_score, ma_td, dd_td, ten_td))
+                        if ten_td_t == hc_tight or ten_td_clean == hc_clean_n:
+                            seen_nodd_pairs.add(pair_key_nodd)
+                            nodd_exact.append((dd_score, ma_td, dd_td, ten_td))
+                        elif hc_clean_n and (hc_clean_n in ten_td_t or ten_td_clean in hc_tight):
+                            seen_nodd_pairs.add(pair_key_nodd)
+                            nodd_contains.append((dd_score, ma_td, dd_td, ten_td))
+                    nodd_exact.sort(key=lambda x: x[0], reverse=True)
+                    nodd_contains.sort(key=lambda x: x[0], reverse=True)
+                    td_cands_nodd = nodd_exact + nodd_contains
 
                     td_cands_nodd.sort(key=lambda x: x[0], reverse=True)
 
