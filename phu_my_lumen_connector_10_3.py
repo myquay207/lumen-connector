@@ -1,20 +1,24 @@
 """
-PHÚ MỸ LUMEN CONNECTOR - v4.0
+PHÚ MỸ LUMEN CONNECTOR - v4.1
 Cài đặt: pip install streamlit pandas openpyxl python-dateutil
 Chạy   : streamlit run phu_my_lumen_connector_v4.py
 
+Thay đổi v4.1 (so với v4.0):
+  PERF 1: Bỏ hoàn toàn UI tích checkbox từng nhà thầu (gây lag ~150 widgets)
+           → Thay bằng multiselect + date_input gọn nhẹ — render nhanh hơn đáng kể
+  PERF 2: Bỏ "Chọn tất cả / Bỏ chọn tất cả" button riêng → gộp vào multiselect
+  PERSIST 1: Thêm lưu/khôi phục mã hoạt chất đã xác nhận (ma_chon_manual + ma_chon_override)
+              qua CSV → hôm sau upload lại là nhớ ngay, không cần chọn lại
+  PERSIST 2: Khi bấm "Xác nhận mã" hoặc "Gán mã này" → tự động gợi ý tải CSV mã đã chọn
+---
 Thay đổi v4.0 (so với v3.8):
-  FIX 1: Bỏ bảng xem trước kết quả (nặng, không cần thiết) → xuất file theo dõi để xem bằng Excel
-  FIX 2: Sửa dedup bug trong NHIEU_MA section: key cũ (MA, dd) → key mới (MA, dd, ten)
-          → Morphin 40.16 + 40.43 giờ hiển thị đúng cả 2 dạng TEN trong dropdown
-  FIX 3: Insulin analog 40.805 / 40.805.1 / 40.30.805.2 hiển thị đủ tùy theo TEN file thầu
-  FIX 4: Magnesi aspartat: _norm_tight chuẩn hóa dấu cách quanh + nhất quán → khớp đúng TEN
-          → TEN_HOAT_CHAT_XK lấy từ file Tân dược, không tự sửa từ file thầu
-  FIX 5: Bỏ bảng mã đường dùng chuẩn (không cần thiết, làm nặng UI)
-  FIX 6: Tối ưu hiệu năng: cache @st.cache_data cho build_thuoc_lookup & build_dd_lookup
-          → không re-build mỗi lần bấm nút
-  FIX 7: Lưu trữ nhà thầu qua st.session_state + download/upload CSV alias để persist
-          khi deploy trên Streamlit Cloud (không dùng file local nữa)
+  FIX 1: Bỏ bảng xem trước kết quả (nặng) → xuất file theo dõi xem bằng Excel
+  FIX 2: Sửa dedup bug NHIEU_MA: key (MA, dd, ten)
+  FIX 3: Insulin analog hiển thị đủ
+  FIX 4: Magnesi aspartat chuẩn hóa dấu cách
+  FIX 5: Bỏ bảng mã đường dùng chuẩn
+  FIX 6: Cache build_thuoc_lookup & build_dd_lookup
+  FIX 7: Lưu nhà thầu qua session_state + CSV
 """
 
 import csv
@@ -37,9 +41,12 @@ import streamlit as st
 # ================================================================
 ALIAS_COLS    = ['TEN_THAU', 'TEN_TANDUC', 'GHI_CHU']
 ALIAS_DD_COLS = ['TEN_HOAT_CHAT', 'DD_GOC', 'DD_CHUAN', 'GHI_CHU']
+MA_CHON_COLS  = ['HC_KEY', 'MA_CHON', 'TEN_HOAT_CHAT_XK', 'DUONG_DUNG_CHUAN', 'MA_DUONG_DUNG', 'LOAI']
+# LOAI: 'NHIEU_MA' hoặc 'THIEU_MA'
 
 def _empty_alias():    return pd.DataFrame(columns=ALIAS_COLS)
 def _empty_alias_dd(): return pd.DataFrame(columns=ALIAS_DD_COLS)
+def _empty_ma_chon():  return pd.DataFrame(columns=MA_CHON_COLS)
 
 def build_alias_lookup(df_alias: pd.DataFrame) -> dict:
     lk = {}
@@ -428,7 +435,7 @@ def suggest_col(source_cols, target):
 # ================================================================
 # STREAMLIT CONFIG
 # ================================================================
-st.set_page_config(page_title="Phú Mỹ Lumen Connector v4.0", page_icon="💊",
+st.set_page_config(page_title="Phú Mỹ Lumen Connector v4.1", page_icon="💊",
                    layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""
 <style>
@@ -439,7 +446,7 @@ st.markdown("""
 st.markdown("""
 <div style="background:linear-gradient(90deg,#1e3a5f,#2e6da4);
      padding:18px 24px;border-radius:10px;margin-bottom:20px;color:white">
-<h2 style="margin:0">💊 PHÚ MỸ LUMEN CONNECTOR <span style="font-size:13px;opacity:.7">v4.0</span></h2>
+<h2 style="margin:0">💊 PHÚ MỸ LUMEN CONNECTOR <span style="font-size:13px;opacity:.7">v4.1</span></h2>
 <p style="margin:4px 0 0 0;opacity:.85;font-size:14px">
 Module xử lý & ánh xạ danh mục thuốc trúng thầu → Xuất Mẫu 03 BHYT</p>
 </div>""", unsafe_allow_html=True)
@@ -451,6 +458,7 @@ _SS_DEFAULTS = {
     'nha_thau_info': {},
     'df_alias': None,
     'df_alias_dd': None,
+    'df_ma_chon': None,       # v4.1: lưu mã đã xác nhận (persist qua CSV)
     'ma_chon_override': {},
     'ma_chon_manual': {},
 }
@@ -461,8 +469,53 @@ if st.session_state['df_alias'] is None:
     st.session_state['df_alias'] = _empty_alias()
 if st.session_state['df_alias_dd'] is None:
     st.session_state['df_alias_dd'] = _empty_alias_dd()
+if st.session_state['df_ma_chon'] is None:
+    st.session_state['df_ma_chon'] = _empty_ma_chon()
 
 tab_main, tab_alias = st.tabs(["🏠 Xử lý chính", "✏️ Quản lý Alias Hoạt chất"])
+
+# ── Helper: áp dụng mã đã lưu (df_ma_chon) lên df_result ──────────────────
+def _apply_saved_ma_chon(df_res: pd.DataFrame, df_mc: pd.DataFrame, dd_lk_ref: dict) -> pd.DataFrame:
+    """Áp dụng mã đã lưu từ df_ma_chon lên df_result. Gọi sau mỗi lần chạy xử lý."""
+    if df_mc is None or df_mc.empty:
+        return df_res
+    for _, mc_row in df_mc.iterrows():
+        hc_key = str(mc_row.get('HC_KEY', '')).strip()
+        if not hc_key or '||' not in hc_key:
+            continue
+        hc_m, dd_m = hc_key.split('||', 1)
+        mask = (df_res['TEN_HOAT_CHAT'] == hc_m) & (df_res['DUONG_DUNG'] == dd_m)
+        if not mask.any():
+            continue
+        chosen_ma  = str(mc_row.get('MA_CHON', '')).strip()
+        chosen_ten = str(mc_row.get('TEN_HOAT_CHAT_XK', '')).strip()
+        chosen_dd  = str(mc_row.get('DUONG_DUNG_CHUAN', '')).strip()
+        chosen_mdd = str(mc_row.get('MA_DUONG_DUNG', '')).strip()
+        if chosen_ma:
+            df_res.loc[mask, 'MA_THUOC'] = chosen_ma
+        if chosen_ten:
+            df_res.loc[mask, 'TEN_HOAT_CHAT_XK'] = chosen_ten
+        if chosen_dd:
+            df_res.loc[mask, 'DUONG_DUNG'] = chosen_dd
+        if chosen_mdd:
+            df_res.loc[mask, 'MA_DUONG_DUNG'] = chosen_mdd
+        df_res.loc[mask, 'NHIEU_MA'] = ''
+    return df_res
+
+def _save_ma_chon(hc_key: str, ma: str, ten_xk: str, dd_chuan: str, ma_dd: str, loai: str):
+    """Lưu 1 lựa chọn mã vào df_ma_chon (upsert theo HC_KEY)."""
+    df_mc = st.session_state['df_ma_chon'].copy()
+    new_row = {
+        'HC_KEY': hc_key, 'MA_CHON': ma, 'TEN_HOAT_CHAT_XK': ten_xk,
+        'DUONG_DUNG_CHUAN': dd_chuan, 'MA_DUONG_DUNG': ma_dd, 'LOAI': loai
+    }
+    existing_mask = df_mc['HC_KEY'] == hc_key
+    if existing_mask.any():
+        for col, val in new_row.items():
+            df_mc.loc[existing_mask, col] = val
+    else:
+        df_mc = pd.concat([df_mc, pd.DataFrame([new_row])], ignore_index=True)
+    st.session_state['df_ma_chon'] = df_mc
 
 # ════════════════════════════════════════════════════
 # TAB 1: XỬ LÝ CHÍNH
@@ -644,9 +697,12 @@ with tab_main:
                 df_work[c] = ''
 
             st.session_state['df_result'] = df_work
-            # Reset chọn mã khi chạy lại
+            # Reset chọn mã khi chạy lại — nhưng áp dụng lại mã đã lưu từ df_ma_chon
             st.session_state['ma_chon_override'] = {}
             st.session_state['ma_chon_manual']   = {}
+            # v4.1: tự áp dụng mã đã lưu
+            df_work = _apply_saved_ma_chon(df_work, st.session_state['df_ma_chon'], dd_lk)
+            st.session_state['df_result'] = df_work
 
         n_qld  = (df_work.get('IS_QLD_KD', pd.Series()) == 'CẦN RÀ SOÁT').sum()
         n_nodd = (df_work['MA_DUONG_DUNG'] == '').sum()
@@ -711,63 +767,65 @@ with tab_main:
                 except Exception as e:
                     st.error(f"❌ Lỗi: {e}")
 
-        # Điền ngày hàng loạt
-        st.subheader("⚡ Điền ngày nhanh cho nhiều nhà thầu")
-        with st.expander("Mở để điền 1 ngày cho nhiều công ty", expanded=False):
+        # ── Điền ngày hàng loạt ────────────────────────────
+        st.subheader("⚡ Điền ngày ký cho nhà thầu")
+        st.caption("Chọn các công ty cùng ký 1 ngày → điền 1 lần. Làm nhiều lần cho các nhóm ngày khác nhau.")
+
+        da_ky_list   = [nt for nt in nha_thau_list if nha_thau_info.get(nt, {}).get('da_ky')]
+        chua_ky_list = [nt for nt in nha_thau_list if not nha_thau_info.get(nt, {}).get('da_ky')]
+
+        tab_chuaky, tab_daky = st.tabs([
+            f"⬜ Chưa ký ({len(chua_ky_list)})",
+            f"✅ Đã ký ({len(da_ky_list)})"
+        ])
+
+        with tab_chuaky:
             selected_bulk = st.multiselect(
-                "Chọn nhà thầu cần điền ngày",
-                options=nha_thau_list, default=[], key='bulk_select')
-            b1, b2 = st.columns(2)
-            with b1:
-                bulk_ngay     = st.date_input("Ngày ký chung", value=date.today(), format="DD/MM/YYYY", key='bulk_ngay')
-            with b2:
-                bulk_thoi_han = st.number_input("Thời hạn chung (tháng)", min_value=1, max_value=60, value=12, key='bulk_th')
-            if st.button("✅ Áp dụng cho các nhà thầu đã chọn", type="primary", use_container_width=True):
-                if selected_bulk:
-                    den_ngay_bulk = add_months(bulk_ngay, bulk_thoi_han)
+                "Chọn nhà thầu cần điền ngày ký",
+                options=chua_ky_list, default=[], key='bulk_select',
+                placeholder="Tìm hoặc chọn từ danh sách...")
+            if selected_bulk:
+                b1, b2 = st.columns(2)
+                with b1:
+                    bulk_ngay = st.date_input("Ngày ký", value=date.today(), format="DD/MM/YYYY", key='bulk_ngay')
+                with b2:
+                    bulk_thoi_han = st.number_input("Thời hạn (tháng)", min_value=1, max_value=60, value=12, key='bulk_th')
+                den_ngay_preview = add_months(bulk_ngay, bulk_thoi_han)
+                st.caption(f"📅 {bulk_ngay.strftime('%d/%m/%Y')} → {den_ngay_preview.strftime('%d/%m/%Y')} | {len(selected_bulk)} nhà thầu")
+                if st.button("✅ Xác nhận ký cho các nhà thầu đã chọn", type="primary", use_container_width=True):
                     for nt in selected_bulk:
                         nha_thau_info[nt] = {
                             'da_ky': True, 'ngay_ky': bulk_ngay,
-                            'thoi_han': int(bulk_thoi_han), 'den_ngay': den_ngay_bulk
+                            'thoi_han': int(bulk_thoi_han), 'den_ngay': den_ngay_preview
                         }
                     st.session_state['nha_thau_info'] = nha_thau_info
-                    st.success(f"✅ Đã cập nhật {len(selected_bulk)} nhà thầu.")
-                    st.rerun()
+                    st.success(f"✅ Đã cập nhật {len(selected_bulk)} nhà thầu."); st.rerun()
+            else:
+                if chua_ky_list:
+                    st.info("☝️ Chọn nhà thầu ở trên để điền ngày ký.")
                 else:
-                    st.warning("Chưa chọn nhà thầu nào.")
+                    st.success("🎉 Tất cả nhà thầu đã ký phụ lục!")
 
-        st.divider()
-        search_nt = st.text_input("🔍 Tìm nhà thầu", placeholder="Gõ tên để lọc...", key='search_nt')
-        filtered_list = [nt for nt in nha_thau_list if search_nt.lower() in nt.lower()] if search_nt else nha_thau_list
-
-        qa, qb = st.columns(2)
-        if qa.button("☑️ Chọn tất cả", use_container_width=True):
-            for nt in nha_thau_list: nha_thau_info[nt]['da_ky'] = True
-            st.rerun()
-        if qb.button("☐ Bỏ chọn tất cả", use_container_width=True):
-            for nt in nha_thau_list: nha_thau_info[nt]['da_ky'] = False
-            st.rerun()
-
-        st.caption(f"Đang hiển thị {len(filtered_list)}/{len(nha_thau_list)} nhà thầu")
-        left_col, right_col = st.columns(2)
-        for idx, nt in enumerate(filtered_list):
-            info = nha_thau_info.get(nt, {'da_ky': False})
-            icon = '✅' if info.get('da_ky') else '⬜'
-            with (left_col if idx%2==0 else right_col).expander(f"{icon} {nt}", expanded=False):
-                da_ky = st.checkbox("Đã ký phụ lục", key=f"ck_{nt}", value=info.get('da_ky', False))
-                if da_ky:
-                    i1, i2 = st.columns(2)
-                    with i1:
-                        ngay_ky = st.date_input("Ngày ký", value=info.get('ngay_ky', date.today()),
-                                                 format="DD/MM/YYYY", key=f"ngay_{nt}")
-                    with i2:
-                        thoi_han = st.number_input("Thời hạn (tháng)", min_value=1, max_value=60,
-                                                    value=info.get('thoi_han', 12), key=f"th_{nt}")
-                    den_ngay = add_months(ngay_ky, thoi_han)
-                    st.caption(f"📅 {ngay_ky.strftime('%d/%m/%Y')} → {den_ngay.strftime('%d/%m/%Y')}")
-                    nha_thau_info[nt] = {'da_ky':True,'ngay_ky':ngay_ky,'thoi_han':int(thoi_han),'den_ngay':den_ngay}
-                else:
-                    nha_thau_info[nt] = {'da_ky': False}
+        with tab_daky:
+            if not da_ky_list:
+                st.info("Chưa có nhà thầu nào ký.")
+            else:
+                rows_dk = []
+                for nt in da_ky_list:
+                    info = nha_thau_info[nt]
+                    rows_dk.append({
+                        'Nhà thầu': nt,
+                        'Ngày ký': info['ngay_ky'].strftime('%d/%m/%Y') if info.get('ngay_ky') else '',
+                        'Hết hạn': info['den_ngay'].strftime('%d/%m/%Y') if info.get('den_ngay') else '',
+                        'TH (tháng)': info.get('thoi_han', ''),
+                    })
+                st.dataframe(pd.DataFrame(rows_dk), use_container_width=True, hide_index=True)
+                undo_sel = st.multiselect("Hủy ký cho nhà thầu", options=da_ky_list, default=[], key='undo_ky')
+                if undo_sel and st.button("↩️ Hủy ký", use_container_width=True):
+                    for nt in undo_sel:
+                        nha_thau_info[nt] = {'da_ky': False}
+                    st.session_state['nha_thau_info'] = nha_thau_info
+                    st.success(f"↩️ Đã hủy ký {len(undo_sel)} nhà thầu."); st.rerun()
 
         st.session_state['nha_thau_info'] = nha_thau_info
 
@@ -877,6 +935,13 @@ with tab_main:
                                 _df.loc[mask, 'MA_DUONG_DUNG']     = lookup_dd(chosen_dd, dd_lk) if chosen_dd else ''
                                 _df.loc[mask, 'NHIEU_MA']          = ''
                                 st.session_state['df_result'] = _df
+                                # v4.1: lưu lại mã đã chọn để persist
+                                hc_key_mc = f"{mr['TEN_HOAT_CHAT']}||{mr['DUONG_DUNG']}"
+                                _save_ma_chon(hc_key_mc, chosen_ma,
+                                              chosen_ten if chosen_ten else mr['TEN_HOAT_CHAT'],
+                                              chosen_dd if chosen_dd else mr['DUONG_DUNG'],
+                                              lookup_dd(chosen_dd, dd_lk) if chosen_dd else '',
+                                              'NHIEU_MA')
                                 st.success(f"✅ Đã gán **{chosen_ma}** — {chosen_ten} — {chosen_dd}")
                                 st.rerun()
                         else:
@@ -966,6 +1031,9 @@ with tab_main:
                                     _df.loc[mask, 'MA_DUONG_DUNG']     = lookup_dd(chosen_dd_td, dd_lk)
                                     st.session_state['df_result'] = _df
                                     st.session_state['ma_chon_manual'][hc_key] = chosen_ma
+                                    # v4.1: lưu lại mã để persist qua ngày
+                                    _save_ma_chon(hc_key, chosen_ma, chosen_ten_td, chosen_dd_td,
+                                                  lookup_dd(chosen_dd_td, dd_lk), 'THIEU_MA')
                                     st.success(f"✅ Đã gán **{chosen_ma}** — {chosen_ten_td} — {chosen_dd_td}")
                                     st.rerun()
                             else:
@@ -1201,7 +1269,11 @@ Alias giúp hệ thống tự nhận ra những khác biệt giữa file thầu 
 - **Alias Đường dùng**: đường dùng file thầu không có trong bảng chuẩn BHYT
 """)
 
-    subtab_ten, subtab_dd = st.tabs(["📝 Alias Tên hoạt chất", "🔬 Alias Đường dùng"])
+    subtab_ten, subtab_dd, subtab_machon = st.tabs([
+        "📝 Alias Tên hoạt chất",
+        "🔬 Alias Đường dùng",
+        "💾 Mã hoạt chất đã xác nhận"
+    ])
 
     with subtab_ten:
         st.caption("**Mục đích:** Tên file thầu khác tên Tân dược → thêm alias để tự khớp.")
@@ -1331,3 +1403,61 @@ Alias giúp hệ thống tự nhận ra những khác biệt giữa file thầu 
                     st.success(f"✅ Đã nạp {len(df_up_dd)} alias đường dùng."); st.rerun()
                 except Exception as e:
                     st.error(f"❌ Lỗi: {e}")
+
+# ════════════════════════════════════════════════════
+# SUBTAB: MÃ HOẠT CHẤT ĐÃ XÁC NHẬN (v4.1)
+# ════════════════════════════════════════════════════
+with subtab_machon:
+    st.markdown("""
+### 💾 Mã hoạt chất đã xác nhận — Lưu & Khôi phục
+
+Mỗi khi bạn bấm **"Xác nhận mã"** hoặc **"Gán mã này"**, lựa chọn đó được lưu tại đây.
+Tải CSV về máy → hôm sau upload lại → khi bấm **"Chạy xử lý"**, các mã đã chọn sẽ tự động được áp dụng lại.
+""")
+    df_mc_tab = st.session_state['df_ma_chon'].copy()
+
+    if df_mc_tab.empty:
+        st.info("Chưa có mã nào được xác nhận. Hãy chạy xử lý và xác nhận mã ở Bước 7.")
+    else:
+        st.success(f"✅ Đang lưu **{len(df_mc_tab)}** mã đã xác nhận.")
+        st.dataframe(df_mc_tab, use_container_width=True, hide_index=True)
+
+        # Xóa 1 dòng
+        with st.expander("🗑️ Xóa mã đã lưu"):
+            del_mc_idx = st.number_input("Số thứ tự dòng cần xóa (từ 0)",
+                                          min_value=0, max_value=max(0, len(df_mc_tab)-1),
+                                          value=0, key='del_mc_idx')
+            if st.button("Xóa dòng mã", key='del_mc_btn'):
+                df_mc_tab = df_mc_tab.drop(index=del_mc_idx).reset_index(drop=True)
+                st.session_state['df_ma_chon'] = df_mc_tab
+                st.success("✅ Đã xóa."); st.rerun()
+
+        if st.button("🗑️ Xóa tất cả mã đã lưu", key='del_mc_all'):
+            st.session_state['df_ma_chon'] = _empty_ma_chon()
+            st.success("✅ Đã xóa toàn bộ."); st.rerun()
+
+    st.divider()
+    st.markdown("##### 💾 Sao lưu / Khôi phục ma_chon.csv")
+    mc1, mc2 = st.columns(2)
+    with mc1:
+        if not df_mc_tab.empty:
+            st.download_button(
+                "⬇️ Tải ma_chon.csv",
+                df_mc_tab.to_csv(index=False).encode('utf-8'),
+                f"ma_chon_{datetime.now().strftime('%Y%m%d')}.csv",
+                "text/csv", use_container_width=True
+            )
+        else:
+            st.caption("Chưa có mã nào để tải.")
+    with mc2:
+        uploaded_mc = st.file_uploader("⬆️ Upload ma_chon.csv", type=['csv'], key='upload_ma_chon')
+        if uploaded_mc:
+            try:
+                df_up_mc = pd.read_csv(uploaded_mc, dtype=str).fillna('')
+                for col in MA_CHON_COLS:
+                    if col not in df_up_mc.columns: df_up_mc[col] = ''
+                st.session_state['df_ma_chon'] = df_up_mc[MA_CHON_COLS]
+                st.success(f"✅ Đã nạp {len(df_up_mc)} mã đã xác nhận. "
+                           f"Bấm **'▶️ Chạy xử lý'** để áp dụng."); st.rerun()
+            except Exception as e:
+                st.error(f"❌ Lỗi: {e}")
